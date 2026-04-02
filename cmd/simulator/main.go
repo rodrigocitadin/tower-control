@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rodrigocitadin/tower-control/pb"
+	"github.com/rodrigocitadin/atc/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

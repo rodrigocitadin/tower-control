@@ -1,4 +1,4 @@
-# Tower Control Simulator
+# Air Traffic Control Simulator
 
 An event-driven, high-concurrency Air Traffic Control (ATC) simulator built with **Go**, **gRPC**, and **RabbitMQ**.
 

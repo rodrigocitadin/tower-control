@@ -36,7 +36,7 @@ func main() {
 		fmt.Printf("\n[Worker] Runway CLEARED -> Plane: %s | Operation: %s | Landings Streak: %d\n", currentAirplane, opType, consecutiveLandings)
 
 		q, _ := ch.QueueDeclare("", false, true, true, false, nil)
-		ch.QueueBind(q.Name, currentAirplane, "tc_events", false, nil)
+		ch.QueueBind(q.Name, currentAirplane, "atc_events", false, nil)
 		eventMsgs, _ := ch.Consume(q.Name, "", true, false, false, false, nil)
 
 		ch.PublishWithContext(context.Background(), "tower_notifications", currentAirplane, false, false, amqp.Publishing{

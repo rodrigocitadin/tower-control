@@ -1,13 +1,13 @@
-module github.com/rodrigocitadin/tower-control
+module github.com/rodrigocitadin/atc
 
 go 1.26.1
 
-require github.com/rabbitmq/amqp091-go v1.10.0
-
 require (
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	github.com/rabbitmq/amqp091-go v1.10.0
+	google.golang.org/protobuf v1.36.11
 )
+
+require google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516 // indirect
 
 require (
 	golang.org/x/net v0.49.0 // indirect

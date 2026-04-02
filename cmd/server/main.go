@@ -7,11 +7,11 @@ import (
 	"net"
 
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/rodrigocitadin/tower-control/pb"
+	"github.com/rodrigocitadin/atc/pb"
 	"google.golang.org/grpc"
 )
 
-type tcServer struct {
+type atcServer struct {
 	pb.UnimplementedControlTowerServer
 	amqpChan *amqp.Channel
 }
@@ -27,7 +27,7 @@ func calculatePriority(timeRemaining float64) uint8 {
 	return uint8(urgency)
 }
 
-func (s *tcServer) RequestTakeoff(ctx context.Context, req *pb.TakeoffRequest) (*pb.TakeoffResponse, error) {
+func (s *atcServer) RequestTakeoff(ctx context.Context, req *pb.TakeoffRequest) (*pb.TakeoffResponse, error) {
 	q, _ := s.amqpChan.QueueDeclare("", false, true, true, false, nil)
 	s.amqpChan.QueueBind(q.Name, req.AirplaneId, "tower_notifications", false, nil)
 	msgs, _ := s.amqpChan.Consume(q.Name, "", true, false, false, false, nil)
@@ -54,7 +54,7 @@ func (s *tcServer) RequestTakeoff(ctx context.Context, req *pb.TakeoffRequest) (
 	}
 }
 
-func (s *tcServer) RequestLanding(ctx context.Context, req *pb.LandingRequest) (*pb.LandingResponse, error) {
+func (s *atcServer) RequestLanding(ctx context.Context, req *pb.LandingRequest) (*pb.LandingResponse, error) {
 	priority := calculatePriority(req.TimeRemaining)
 
 	q, _ := s.amqpChan.QueueDeclare("", false, true, true, false, nil)
@@ -86,18 +86,18 @@ func (s *tcServer) RequestLanding(ctx context.Context, req *pb.LandingRequest) (
 	}
 }
 
-func (s *tcServer) StartOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
-	s.amqpChan.PublishWithContext(ctx, "tc_events", req.AirplaneId, false, false, amqp.Publishing{Body: []byte("START")})
+func (s *atcServer) StartOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
+	s.amqpChan.PublishWithContext(ctx, "atc_events", req.AirplaneId, false, false, amqp.Publishing{Body: []byte("START")})
 	return &pb.OperationResponse{Success: true, Message: "Start signal sent"}, nil
 }
 
-func (s *tcServer) CompleteOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
-	s.amqpChan.PublishWithContext(ctx, "tc_events", req.AirplaneId, false, false, amqp.Publishing{Body: []byte("COMPLETE")})
+func (s *atcServer) CompleteOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
+	s.amqpChan.PublishWithContext(ctx, "atc_events", req.AirplaneId, false, false, amqp.Publishing{Body: []byte("COMPLETE")})
 	return &pb.OperationResponse{Success: true, Message: "Completion signal sent"}, nil
 }
 
-func (s *tcServer) CancelOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
-	s.amqpChan.PublishWithContext(ctx, "tc_events", req.AirplaneId, false, false, amqp.Publishing{Body: []byte("CANCEL")})
+func (s *atcServer) CancelOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
+	s.amqpChan.PublishWithContext(ctx, "atc_events", req.AirplaneId, false, false, amqp.Publishing{Body: []byte("CANCEL")})
 	return &pb.OperationResponse{Success: true, Message: "Cancel signal sent"}, nil
 }
 
@@ -115,12 +115,12 @@ func main() {
 	ch.QueueDeclare("landing_queue", true, false, false, false, args)
 	ch.QueueDeclare("takeoff_queue", true, false, false, false, nil)
 
-	ch.ExchangeDeclare("tc_events", "direct", true, false, false, false, nil)
+	ch.ExchangeDeclare("atc_events", "direct", true, false, false, false, nil)
 	ch.ExchangeDeclare("tower_notifications", "direct", true, false, false, false, nil)
 
 	lis, _ := net.Listen("tcp", ":3000")
 	grpcServer := grpc.NewServer()
-	pb.RegisterControlTowerServer(grpcServer, &tcServer{amqpChan: ch})
+	pb.RegisterControlTowerServer(grpcServer, &atcServer{amqpChan: ch})
 
 	log.Println("gRPC server listening on :3000...")
 	grpcServer.Serve(lis)
