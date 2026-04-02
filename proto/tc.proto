@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "tower-control/pb";
+
+service ControlTower {
+  rpc RequestLanding(LandingRequest) returns (LandingResponse);
+  rpc StartOperation(OperationRequest) returns (OperationResponse);
+  rpc CompleteOperation(OperationRequest) returns (OperationResponse);
+  rpc CancelOperation(OperationRequest) returns (OperationResponse);
+}
+
+message LandingRequest {
+  string airplane_id = 1;
+  double time_remaining = 2;
+}
+
+message LandingResponse {
+  string status = 1;
+}
+
+message OperationRequest {
+  string airplane_id = 1;
+}
+
+message OperationResponse {
+  bool success = 1;
+  string message = 2;
+}

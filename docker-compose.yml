@@ -1,0 +1,24 @@
+services:
+  redis:
+    image: redis:8
+    container_name: tc_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: tc_rabbitmq
+    ports:
+      - "5672:5672"   
+      - "15672:15672" 
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  rabbitmq_data:
