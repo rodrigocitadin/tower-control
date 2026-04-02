@@ -27,6 +27,33 @@ func calculatePriority(timeRemaining float64) uint8 {
 	return uint8(urgency)
 }
 
+func (s *tcServer) RequestTakeoff(ctx context.Context, req *pb.TakeoffRequest) (*pb.TakeoffResponse, error) {
+	q, _ := s.amqpChan.QueueDeclare("", false, true, true, false, nil)
+	s.amqpChan.QueueBind(q.Name, req.AirplaneId, "tower_notifications", false, nil)
+	msgs, _ := s.amqpChan.Consume(q.Name, "", true, false, false, false, nil)
+
+	err := s.amqpChan.PublishWithContext(ctx, "", "takeoff_queue", false, false, amqp.Publishing{
+		DeliveryMode: amqp.Persistent,
+		ContentType:  "text/plain",
+		Body:         []byte(req.AirplaneId),
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to enqueue takeoff: %w", err)
+	}
+
+	log.Printf("[gRPC] Plane %s enqueued for TAKEOFF. Waiting for clearance...", req.AirplaneId)
+
+	select {
+	case <-ctx.Done():
+		s.amqpChan.QueueDelete(q.Name, false, false, false)
+		return nil, ctx.Err()
+	case <-msgs:
+		s.amqpChan.QueueDelete(q.Name, false, false, false)
+		return &pb.TakeoffResponse{Status: "CLEARED"}, nil
+	}
+}
+
 func (s *tcServer) RequestLanding(ctx context.Context, req *pb.LandingRequest) (*pb.LandingResponse, error) {
 	priority := calculatePriority(req.TimeRemaining)
 
@@ -86,6 +113,7 @@ func main() {
 
 	args := amqp.Table{"x-max-priority": 10}
 	ch.QueueDeclare("landing_queue", true, false, false, false, args)
+	ch.QueueDeclare("takeoff_queue", true, false, false, false, nil)
 
 	ch.ExchangeDeclare("tc_events", "direct", true, false, false, false, nil)
 	ch.ExchangeDeclare("tower_notifications", "direct", true, false, false, false, nil)

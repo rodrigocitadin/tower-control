@@ -9,6 +9,7 @@ service ControlTower {
   rpc StartOperation(OperationRequest) returns (OperationResponse);
   rpc CompleteOperation(OperationRequest) returns (OperationResponse);
   rpc CancelOperation(OperationRequest) returns (OperationResponse);
+  rpc RequestTakeoff(TakeoffRequest) returns (TakeoffResponse);
 }
 
 message LandingRequest {
@@ -27,4 +28,12 @@ message OperationRequest {
 message OperationResponse {
   bool success = 1;
   string message = 2;
+}
+
+message TakeoffRequest {
+  string airplane_id = 1;
+}
+
+message TakeoffResponse {
+  string status = 1;
 }

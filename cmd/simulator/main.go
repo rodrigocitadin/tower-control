@@ -36,40 +36,57 @@ func main() {
 			arrivalDelay := time.Duration(rand.Float64()*20.0) * time.Second
 			time.Sleep(arrivalDelay)
 
-			fuelSeconds := 2.0 + rand.Float64()*43.0
 			airplaneID := fmt.Sprintf("FLIGHT-%03d", planeNum)
-
-			fmt.Printf("[%s] Arrived at airspace! Requesting landing. Fuel for: %05.2f sec\n", airplaneID, fuelSeconds)
-
+			isTakeoff := rand.Float32() < 0.30
 			requestTime := time.Now()
 
-			res, err := client.RequestLanding(context.Background(), &pb.LandingRequest{
-				AirplaneId:    airplaneID,
-				TimeRemaining: fuelSeconds,
-			})
-
-			if err != nil {
-				log.Printf("[%s] Communication error: %v\n", airplaneID, err)
-				return
-			}
-
-			if res.Status == "CLEARED" {
-				timeWaited := time.Since(requestTime).Seconds()
-
-				if timeWaited > fuelSeconds {
-					fmt.Printf("[%s] FATAL CRASH: Ran out of fuel! (Waited %.2f s, Fuel %.2f s)\n", airplaneID, timeWaited, fuelSeconds)
-					client.CancelOperation(context.Background(), &pb.OperationRequest{AirplaneId: airplaneID})
+			if isTakeoff {
+				fmt.Printf("[%s] Requesting TAKEOFF.\n", airplaneID)
+				res, err := client.RequestTakeoff(context.Background(), &pb.TakeoffRequest{AirplaneId: airplaneID})
+				if err != nil {
 					return
 				}
 
-				fmt.Printf("[%s] CLEARED: Landing safely! (Waited %.2f s, Fuel %.2f s)\n", airplaneID, timeWaited, fuelSeconds)
-				client.StartOperation(context.Background(), &pb.OperationRequest{AirplaneId: airplaneID})
+				if res.Status == "CLEARED" {
+					fmt.Printf("[%s] CLEARED: Taking off! (Waited %.2f s)\n", airplaneID, time.Since(requestTime).Seconds())
+					client.StartOperation(context.Background(), &pb.OperationRequest{AirplaneId: airplaneID})
+					time.Sleep(1 * time.Second)
+					client.CompleteOperation(context.Background(), &pb.OperationRequest{AirplaneId: airplaneID})
+				}
+			} else {
+				fuelSeconds := 2.0 + rand.Float64()*43.0
 
-				time.Sleep(1 * time.Second)
+				fmt.Printf("[%s] Arrived at airspace! Requesting landing. Fuel for: %05.2f sec\n", airplaneID, fuelSeconds)
 
-				fmt.Printf("[%s] Landing complete! Releasing runway.\n", airplaneID)
-				client.CompleteOperation(context.Background(), &pb.OperationRequest{AirplaneId: airplaneID})
+				res, err := client.RequestLanding(context.Background(), &pb.LandingRequest{
+					AirplaneId:    airplaneID,
+					TimeRemaining: fuelSeconds,
+				})
+
+				if err != nil {
+					log.Printf("[%s] Communication error: %v\n", airplaneID, err)
+					return
+				}
+
+				if res.Status == "CLEARED" {
+					timeWaited := time.Since(requestTime).Seconds()
+
+					if timeWaited > fuelSeconds {
+						fmt.Printf("[%s] FATAL CRASH: Ran out of fuel! (Waited %.2f s, Fuel %.2f s)\n", airplaneID, timeWaited, fuelSeconds)
+						client.CancelOperation(context.Background(), &pb.OperationRequest{AirplaneId: airplaneID})
+						return
+					}
+
+					fmt.Printf("[%s] CLEARED: Landing safely! (Waited %.2f s, Fuel %.2f s)\n", airplaneID, timeWaited, fuelSeconds)
+					client.StartOperation(context.Background(), &pb.OperationRequest{AirplaneId: airplaneID})
+
+					time.Sleep(1 * time.Second)
+
+					fmt.Printf("[%s] Landing complete! Releasing runway.\n", airplaneID)
+					client.CompleteOperation(context.Background(), &pb.OperationRequest{AirplaneId: airplaneID})
+				}
 			}
+
 		}(i)
 	}
 

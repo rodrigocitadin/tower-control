@@ -21,13 +21,19 @@ func main() {
 	defer ch.Close()
 
 	ch.Qos(1, 0, false)
-	msgs, _ := ch.Consume("landing_queue", "", false, false, false, false, nil)
+	landingMsgs, _ := ch.Consume("landing_queue", "", false, false, false, false, nil)
+	takeoffMsgs, _ := ch.Consume("takeoff_queue", "", false, false, false, false, nil)
 
 	fmt.Println("[Worker] FSM started. Runway FREE.")
 
-	for d := range msgs {
+	consecutiveLandings := 0
+	const maxLandingsBeforeTakeoff = 3
+
+	for {
+		d, opType := getNextPlane(landingMsgs, takeoffMsgs, &consecutiveLandings, maxLandingsBeforeTakeoff)
+
 		currentAirplane := string(d.Body)
-		fmt.Printf("\n[Worker] Runway CLEARED -> Plane: %s | Priority MSG: %d\n", currentAirplane, d.Priority)
+		fmt.Printf("\n[Worker] Runway CLEARED -> Plane: %s | Operation: %s | Landings Streak: %d\n", currentAirplane, opType, consecutiveLandings)
 
 		q, _ := ch.QueueDeclare("", false, true, true, false, nil)
 		ch.QueueBind(q.Name, currentAirplane, "tc_events", false, nil)
@@ -46,7 +52,7 @@ func main() {
 		}
 
 		if action == "CANCEL" {
-			fmt.Printf("[Worker] EMERGENCY: Plane %s CANCELED the landing! Releasing runway instantly.\n", currentAirplane)
+			fmt.Printf("[Worker] EMERGENCY: Plane %s CANCELED the %s! Releasing runway instantly.\n", currentAirplane, opType)
 			cleanUp(ch, q.Name, &d)
 			continue
 		}
@@ -55,7 +61,6 @@ func main() {
 			fmt.Printf("[Worker] Plane %s IN USE of runway.\n", currentAirplane)
 
 			completeAction, completeErr := waitForAction(eventMsgs, 30*time.Second)
-
 			if completeErr != nil || completeAction != "COMPLETE" {
 				fmt.Printf("[Worker] EMERGENCY: Plane %s didn't conclude in time!\n", currentAirplane)
 				cleanUp(ch, q.Name, &d)
@@ -66,6 +71,40 @@ func main() {
 			d.Ack(false)
 			ch.QueueDelete(q.Name, false, false, false)
 		}
+	}
+}
+
+func getNextPlane(landingMsgs, takeoffMsgs <-chan amqp.Delivery, consecutive *int, maxLandings int) (amqp.Delivery, string) {
+	if *consecutive >= maxLandings {
+		select {
+		case d := <-takeoffMsgs:
+			*consecutive = 0
+			return d, "TAKEOFF"
+		default:
+		}
+	}
+
+	select {
+	case d := <-landingMsgs:
+		*consecutive++
+		return d, "LANDING"
+	default:
+	}
+
+	select {
+	case d := <-takeoffMsgs:
+		*consecutive = 0
+		return d, "TAKEOFF"
+	default:
+	}
+
+	select {
+	case d := <-landingMsgs:
+		*consecutive++
+		return d, "LANDING"
+	case d := <-takeoffMsgs:
+		*consecutive = 0
+		return d, "TAKEOFF"
 	}
 }
 
