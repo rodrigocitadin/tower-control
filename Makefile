@@ -3,7 +3,7 @@
 help:
 	@echo "Available commands:"
 	@echo "  make gen           - Generate Protobuf files"
-	@echo "  make infra-up      - Start infrastructure (RabbitMQ) in the background"
+	@echo "  make infra-up      - Start infrastructure (Redis) in the background"
 	@echo "  make infra-down    - Stop and remove infrastructure containers"
 	@echo "  make run-server    - Start the gRPC API server"
 	@echo "  make run-worker    - Start the FSM Worker"
@@ -21,9 +21,9 @@ gen:
 	@echo "==> Files successfully generated in pb/ folder"
 
 infra-up:
-	@echo "==> Starting infrastructure (RabbitMQ)..."
+	@echo "==> Starting infrastructure (Redis)..."
 	@docker compose up -d
-	@echo "==> Infrastructure is running. Web panel at http://localhost:15672"
+	@echo "==> Infrastructure is running."
 
 infra-down:
 	@echo "==> Stopping infrastructure..."

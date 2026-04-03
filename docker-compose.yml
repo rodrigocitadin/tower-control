@@ -1,13 +1,13 @@
 services:
-  rabbitmq:
-    image: rabbitmq:4-management
-    container_name: atc_rabbitmq
+  redis:
+    image: redis:8
+    container_name: atc_redis
     ports:
-      - "5672:5672"   
-      - "15672:15672" 
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
+      - redis_data:/data
     restart: unless-stopped
 
 volumes:
-  rabbitmq_data:
+  redis_data:
