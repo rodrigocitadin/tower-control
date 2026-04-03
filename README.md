@@ -16,7 +16,7 @@ Managing an airport runway is a classic critical-resource problem. The system mu
 
 * **Go (Golang):** Chosen for its first-class concurrency capabilities (goroutines/channels) to simulate dozens of planes communicating simultaneously.
 * **gRPC & Protobuf:** Used for the strict, high-performance synchronous communication between the airplanes (clients) and the Control Tower (server).
-* **Redis:** Acts as the high-speed, mathematically precise in-memory data store, utilizing **Sorted Sets (ZSET)** for priority queues, **Lists** for FIFO queues, and **Pub/Sub** for event notification.
+* **Redis:** Acts as the high-speed, mathematically precise in-memory data store, utilizing **Sorted Sets (ZSET)** for priority queues and **Lists** for FIFO queues and reliable point-to-point event notifications.
 * **Docker & Make:** For reproducible infrastructure and streamlined execution.
 
 ## Architectural Trade-offs: Redis vs. RabbitMQ
@@ -40,16 +40,24 @@ By moving to Redis, we sacrificed the native `Ack` (Acknowledgment) mechanism of
 ## Core Mechanics & System Design
 
 ### 1. Earliest Deadline First (EDF)
+
 When an airplane requests a landing, the gRPC server calculates the exact UNIX timestamp of when it will run out of fuel. It pushes this to the Redis `landing_queue` (ZSET). The Worker always pops the plane with the smallest timestamp, guaranteeing absolute priority without CPU-heavy resorting.
 
 ### 2. Starvation Prevention (Weighted Fair Queuing)
+
 Because landing emergencies could theoretically block the runway forever, the FSM (Finite State Machine) Worker implements a weighted scheduler. It guarantees that for every **3 landings**, the system forcefully reads from the Redis `takeoff_queue` (FIFO List) for **1 takeoff** (if any are queued), preventing takeoff starvation while prioritizing safety.
 
-### 3. Synchronous API over Asynchronous Messaging
-Airplanes use synchronous gRPC calls that *block* until the ATC grants clearance. Behind the scenes, the gRPC server routes the request through Redis and subscribes to a specific **Redis Pub/Sub** channel for that airplane. This perfectly hides the async complexity from the client.
+### 3. Idempotency & Distributed Locks
 
-### 4. Fail-Fast & Cascading Failure Mitigation
-If an airplane runs out of fuel while waiting in the queue, it instantly triggers a `CANCEL` RPC call (Fail-Fast pattern). The Worker catches this event via Pub/Sub and releases the runway in milliseconds. If an airplane simply stops responding, the Worker relies on strict `Timeouts` to abort the operation and call the next plane, preventing the entire airport from halting (Cascading Failure).
+To prevent duplicate requests and race conditions, the gRPC API implements strong idempotency using Redis Distributed Locks (`SET` with `NX` and TTL). If a plane attempts to request operations concurrently, the system instantly blocks the duplicate request, maintaining queue integrity.
+
+### 4. Synchronous API over Reliable Asynchronous Messaging
+
+Airplanes use synchronous gRPC calls that *block* until the ATC grants clearance. Behind the scenes, the gRPC server routes the request through Redis and waits on a dedicated blocking List (`BLPOP`) for that specific airplane. This eliminates lost messages from fire-and-forget Pub/Sub and perfectly hides the async complexity from the client.
+
+### 5. Fail-Fast & Timeout Re-queueing
+
+If an airplane runs out of fuel while waiting, it instantly triggers a `CANCEL` RPC call (Fail-Fast pattern), releasing the runway in milliseconds. If a plane stops responding due to network issues, the Worker's strict `Timeouts` trigger a safe re-queueing mechanism, placing the airplane back into the priority queue using its *original timestamp score*, ensuring it doesn't lose its priority status.
 
 ## Getting Started
 
