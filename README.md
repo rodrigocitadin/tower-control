@@ -1,14 +1,14 @@
 # Air Traffic Control Simulator
 
-An event-driven, high-concurrency Air Traffic Control (ATC) simulator built with **Go**, **gRPC**, and **RabbitMQ**.
+An event-driven, high-concurrency Air Traffic Control (ATC) simulator built with **Go**, **gRPC**, and **Redis**.
 
-This project serves as a proof-of-concept for advanced distributed system patterns, specifically tackling complex queueing problems like strict priority routing, starvation prevention, and cascading failure mitigation.
+This project serves as a proof-of-concept for advanced distributed system patterns, specifically tackling complex queueing problems like strict priority routing, starvation prevention, and perfect Earliest Deadline First (EDF) scheduling.
 
 ## The Challenge
 
 Managing an airport runway is a classic critical-resource problem. The system must handle a massive influx of concurrent requests from airplanes wanting to land or take off. It must guarantee that:
 
-1. Planes running out of fuel land first.
+1. Planes closest to crashing (running out of fuel) land first, with millisecond precision.
 2. Planes that crash or lose communication do not lock the runway.
 3. Planes waiting to take off are not starved indefinitely by a constant stream of emergency landings.
 
@@ -16,55 +16,44 @@ Managing an airport runway is a classic critical-resource problem. The system mu
 
 * **Go (Golang):** Chosen for its first-class concurrency capabilities (goroutines/channels) to simulate dozens of planes communicating simultaneously.
 * **gRPC & Protobuf:** Used for the strict, high-performance synchronous communication between the airplanes (clients) and the Control Tower (server).
-* **RabbitMQ:** Acts as the async message broker and shock absorber, routing requests into distinct queues (`landing_queue` and `takeoff_queue`) and handling priority buffering.
+* **Redis:** Acts as the high-speed, mathematically precise in-memory data store, utilizing **Sorted Sets (ZSET)** for priority queues, **Lists** for FIFO queues, and **Pub/Sub** for event notification.
 * **Docker & Make:** For reproducible infrastructure and streamlined execution.
 
-## Architectural Trade-offs: RabbitMQ vs. Redis
+## Architectural Trade-offs: Redis vs. RabbitMQ
 
-A common question in this design is why we opted for **RabbitMQ** over **Redis Sorted Sets (ZSET)** for the priority queue. 
+During the system design phase, this architecture migrated from **RabbitMQ** to **Redis** to solve a specific, complex issue: **Priority Aging (Starvation)**.
 
-### Why RabbitMQ?
+### Why Redis Won (The Aging Problem)
 
-The deciding factor was **Reliability and Message Acknowledgments (Acks)**. 
+In traditional message brokers like RabbitMQ, priority is a static "bucket" (e.g., Priority 1 to 10) assigned at the moment a message enters the queue. If a plane enters with 40s of fuel (Priority 6), it stays at Priority 6 forever. If it waits for 35s, it now only has 5s of fuel, but new planes arriving with 5s of fuel will receive Priority 10 and jump ahead of it, causing the older plane to crash.
 
-* **Guaranteed Processing:** RabbitMQ’s `Ack` system ensures that if a Worker crashes while a plane is on the runway, the message is not lost. It remains in the queue and is re-delivered to another worker.
-* **Native Priority Support:** It provides built-in support for priority levels (1-10), which simplifies the implementation of the Earliest Deadline First (EDF) logic without extra Lua scripting or complex client-side management.
+**Redis** solves this elegantly by using a continuous timeline instead of static buckets. 
 
-### How we could use Redis (The Alternative Path)
+* We use a **Redis Sorted Set (ZSET)**.
+* The "Score" of the plane is its **Absolute Crash Timestamp** (`CurrentTime + FuelRemaining`).
+* As time passes, the absolute timestamp never changes, but the system simply pulls the plane with the lowest numerical score using `BZPOPMIN`. The Earliest Deadline First is always mathematically perfect.
 
-If absolute precision were more critical than "at-least-once" delivery guarantees, Redis would be the superior choice for ordering:
+### What We Sacrificed (Acknowledgments)
 
-* **The ZSET Strategy:** We would use a **Redis Sorted Set** where the "Score" is the absolute `Crash Timestamp` (`CurrentTime + FuelRemaining`).
-* **Millisecond Precision:** Unlike RabbitMQ’s 10-bucket priority system, Redis would provide a perfectly sorted list with millisecond precision, ensuring the most urgent plane is *always* at the top.
-* **The Workflow:** 
-    1. The Server would insert planes using `ZADD`.
-    2. The Worker would pull the most urgent plane using `BZPOPMIN`.
-    3. Communication for signals (`START`, `CANCEL`) would be handled via **Redis Pub/Sub** channels named after each `airplane_id`.
-
-In short, **RabbitMQ** was chosen for its **safety and robustness** in a simulation of critical resources, while **Redis** would be the choice for **mathematical precision** in ordering.
+By moving to Redis, we sacrificed the native `Ack` (Acknowledgment) mechanism of RabbitMQ. In Redis, `BZPOPMIN` physically removes the item from the queue. If our Worker crashes immediately after pulling a plane, that plane's data is lost. In a production scenario, this would be mitigated by atomic Lua scripts that move the plane to an "in-flight" tracking list until confirmed.
 
 ## Core Mechanics & System Design
 
 ### 1. Earliest Deadline First (EDF)
-
-When an airplane requests a landing, it sends its remaining fuel time. The gRPC server calculates a priority score (1-10) and publishes it to a RabbitMQ priority queue. The system ensures that planes closest to a fatal crash jump to the front of the line, regardless of arrival order.
+When an airplane requests a landing, the gRPC server calculates the exact UNIX timestamp of when it will run out of fuel. It pushes this to the Redis `landing_queue` (ZSET). The Worker always pops the plane with the smallest timestamp, guaranteeing absolute priority without CPU-heavy resorting.
 
 ### 2. Starvation Prevention (Weighted Fair Queuing)
-
-Because landing emergencies could theoretically block the runway forever, the FSM (Finite State Machine) Worker implements a weighted scheduler. It guarantees that for every **3 landings**, the system forcefully yields the runway for **1 takeoff** (if any are queued), preventing takeoff starvation while prioritizing safety.
+Because landing emergencies could theoretically block the runway forever, the FSM (Finite State Machine) Worker implements a weighted scheduler. It guarantees that for every **3 landings**, the system forcefully reads from the Redis `takeoff_queue` (FIFO List) for **1 takeoff** (if any are queued), preventing takeoff starvation while prioritizing safety.
 
 ### 3. Synchronous API over Asynchronous Messaging
-
-Airplanes use synchronous gRPC calls that *block* until the ATC grants clearance. Behind the scenes, the gRPC server routes the request through RabbitMQ and waits for a specific `CLEARED` notification from the Worker using temporary reply queues. This hides the async complexity from the client.
+Airplanes use synchronous gRPC calls that *block* until the ATC grants clearance. Behind the scenes, the gRPC server routes the request through Redis and subscribes to a specific **Redis Pub/Sub** channel for that airplane. This perfectly hides the async complexity from the client.
 
 ### 4. Fail-Fast & Cascading Failure Mitigation
-
-If an airplane runs out of fuel while waiting in the queue, it instantly triggers a `CANCEL` RPC call (Fail-Fast pattern). The Worker catches this event and releases the runway in milliseconds. If an airplane simply stops responding, the Worker relies on strict `Timeouts` to abort the operation and call the next plane, preventing the entire airport from halting (Cascading Failure).
+If an airplane runs out of fuel while waiting in the queue, it instantly triggers a `CANCEL` RPC call (Fail-Fast pattern). The Worker catches this event via Pub/Sub and releases the runway in milliseconds. If an airplane simply stops responding, the Worker relies on strict `Timeouts` to abort the operation and call the next plane, preventing the entire airport from halting (Cascading Failure).
 
 ## Getting Started
 
 ### Prerequisites
-
 * Go 1.26+
 * Docker & Docker Compose
 * Make
@@ -76,7 +65,8 @@ The project is easily orchestrated using the provided `Makefile`. Open three sep
 
 **1. Start the Infrastructure**
 
-Spins up the RabbitMQ broker via Docker.
+Spins up the Redis instance via Docker.
+
 ```bash
 make infra-up
 ```
@@ -88,6 +78,7 @@ In Terminal 1, start the gRPC Server:
 ```bash
 make run-server
 ```
+
 In Terminal 2, start the Finite State Machine Worker:
 
 ```bash
