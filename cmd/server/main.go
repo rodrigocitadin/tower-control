@@ -18,63 +18,85 @@ type atcServer struct {
 }
 
 func (s *atcServer) RequestTakeoff(ctx context.Context, req *pb.TakeoffRequest) (*pb.TakeoffResponse, error) {
-	pubsub := s.rdb.Subscribe(ctx, "tower_notifications:"+req.AirplaneId)
-	defer pubsub.Close()
-	ch := pubsub.Channel()
+	err := s.rdb.SetArgs(ctx, "active:"+req.AirplaneId, "1", redis.SetArgs{
+		Mode: "NX",
+		TTL:  10 * time.Minute,
+	}).Err()
 
-	err := s.rdb.RPush(ctx, "takeoff_queue", req.AirplaneId).Err()
 	if err != nil {
+		if err == redis.Nil {
+			return nil, fmt.Errorf("plane %s is already in an active operation", req.AirplaneId)
+		}
+		return nil, fmt.Errorf("failed to set active state: %w", err)
+	}
+
+	err = s.rdb.RPush(ctx, "takeoff_queue", req.AirplaneId).Err()
+	if err != nil {
+		s.rdb.Del(ctx, "active:"+req.AirplaneId)
 		return nil, fmt.Errorf("failed to enqueue takeoff: %w", err)
 	}
 
 	log.Printf("[gRPC] Plane %s enqueued for TAKEOFF. Waiting for clearance...", req.AirplaneId)
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-ch:
-		return &pb.TakeoffResponse{Status: "CLEARED"}, nil
+	res, err := s.rdb.BLPop(ctx, 0, "response:"+req.AirplaneId).Result()
+	if err != nil {
+		s.rdb.Del(ctx, "active:"+req.AirplaneId)
+		return nil, err
 	}
+
+	return &pb.TakeoffResponse{Status: res[1]}, nil
 }
 
 func (s *atcServer) RequestLanding(ctx context.Context, req *pb.LandingRequest) (*pb.LandingResponse, error) {
+	err := s.rdb.SetArgs(ctx, "active:"+req.AirplaneId, "1", redis.SetArgs{
+		Mode: "NX",
+		TTL:  10 * time.Minute,
+	}).Err()
+
+	if err != nil {
+		if err == redis.Nil {
+			return nil, fmt.Errorf("plane %s is already in an active operation", req.AirplaneId)
+		}
+		return nil, fmt.Errorf("failed to set active state: %w", err)
+	}
+
 	crashTime := float64(time.Now().UnixNano())/1e9 + req.TimeRemaining
 
-	pubsub := s.rdb.Subscribe(ctx, "tower_notifications:"+req.AirplaneId)
-	defer pubsub.Close()
-	ch := pubsub.Channel()
-
-	err := s.rdb.ZAdd(ctx, "landing_queue", redis.Z{
+	err = s.rdb.ZAdd(ctx, "landing_queue", redis.Z{
 		Score:  crashTime,
 		Member: req.AirplaneId,
 	}).Err()
 
 	if err != nil {
+		s.rdb.Del(ctx, "active:"+req.AirplaneId)
 		return nil, fmt.Errorf("failed to enqueue to Redis: %w", err)
 	}
 
 	log.Printf("[gRPC] Plane %s enqueued for LANDING (Crash at: %.2f). Waiting for clearance...", req.AirplaneId, crashTime)
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-ch:
-		return &pb.LandingResponse{Status: "CLEARED"}, nil
+	res, err := s.rdb.BLPop(ctx, 0, "response:"+req.AirplaneId).Result()
+	if err != nil {
+		s.rdb.Del(ctx, "active:"+req.AirplaneId)
+		return nil, err
 	}
+
+	return &pb.LandingResponse{Status: res[1]}, nil
 }
 
 func (s *atcServer) StartOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
-	s.rdb.Publish(ctx, "atc_events:"+req.AirplaneId, "START")
+	s.rdb.RPush(ctx, "events:"+req.AirplaneId, "START")
 	return &pb.OperationResponse{Success: true, Message: "Start signal sent"}, nil
 }
 
 func (s *atcServer) CompleteOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
-	s.rdb.Publish(ctx, "atc_events:"+req.AirplaneId, "COMPLETE")
+	s.rdb.Del(ctx, "active:"+req.AirplaneId)
+	s.rdb.RPush(ctx, "events:"+req.AirplaneId, "COMPLETE")
 	return &pb.OperationResponse{Success: true, Message: "Completion signal sent"}, nil
 }
 
 func (s *atcServer) CancelOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
-	s.rdb.Publish(ctx, "atc_events:"+req.AirplaneId, "CANCEL")
+	s.rdb.Del(ctx, "active:"+req.AirplaneId)
+	s.rdb.RPush(ctx, "events:"+req.AirplaneId, "CANCEL")
 	return &pb.OperationResponse{Success: true, Message: "Cancel signal sent"}, nil
 }
 
@@ -93,6 +115,6 @@ func main() {
 	grpcServer := grpc.NewServer()
 	pb.RegisterControlTowerServer(grpcServer, &atcServer{rdb: rdb})
 
-	log.Println("gRPC server (Redis Engine) listening on :3000...")
+	log.Println("gRPC server (Redis Reliable Engine) listening on :3000...")
 	grpcServer.Serve(lis)
 }

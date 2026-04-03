@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -26,84 +25,81 @@ func main() {
 	ctx := context.Background()
 
 	for {
-		currentAirplane, opType := getNextPlane(ctx, rdb, &consecutiveLandings, maxLandingsBeforeTakeoff)
+		currentAirplane, opType, score := getNextPlane(ctx, rdb, &consecutiveLandings, maxLandingsBeforeTakeoff)
 
 		if currentAirplane == "" {
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
 		fmt.Printf("\n[Worker] Runway CLEARED -> Plane: %s | Operation: %s | Landings Streak: %d\n", currentAirplane, opType, consecutiveLandings)
 
-		pubsub := rdb.Subscribe(ctx, "atc_events:"+currentAirplane)
-		eventMsgs := pubsub.Channel()
+		rdb.RPush(ctx, "response:"+currentAirplane, "CLEARED")
 
-		rdb.Publish(ctx, "tower_notifications:"+currentAirplane, "CLEARED")
-
-		action, err := waitForAction(eventMsgs, 5*time.Second)
+		action, err := waitForAction(ctx, rdb, currentAirplane, 5*time.Second)
 
 		if err != nil {
-			fmt.Printf("[Worker] TIMEOUT: Plane %s didn't respond. Aborting.\n", currentAirplane)
-			pubsub.Close()
+			fmt.Printf("[Worker] TIMEOUT: Plane %s didn't respond. RE-QUEUEING!\n", currentAirplane)
+			requeuePlane(ctx, rdb, currentAirplane, opType, score)
 			continue
 		}
 
 		if action == "CANCEL" {
 			fmt.Printf("[Worker] EMERGENCY: Plane %s CANCELED the %s! Releasing runway instantly.\n", currentAirplane, opType)
-			pubsub.Close()
 			continue
 		}
 
 		if action == "START" {
 			fmt.Printf("[Worker] Plane %s IN USE of runway.\n", currentAirplane)
 
-			completeAction, completeErr := waitForAction(eventMsgs, 30*time.Second)
+			completeAction, completeErr := waitForAction(ctx, rdb, currentAirplane, 30*time.Second)
 			if completeErr != nil || completeAction != "COMPLETE" {
-				fmt.Printf("[Worker] EMERGENCY: Plane %s didn't conclude in time!\n", currentAirplane)
-				pubsub.Close()
+				fmt.Printf("[Worker] TIMEOUT: Plane %s didn't conclude in time! RE-QUEUEING!\n", currentAirplane)
+				requeuePlane(ctx, rdb, currentAirplane, opType, score)
 				continue
 			}
 
 			fmt.Printf("[Worker] Plane %s left the runway. Returning to FREE state.\n", currentAirplane)
 		}
-		pubsub.Close()
 	}
 }
 
-func getNextPlane(ctx context.Context, rdb *redis.Client, consecutive *int, maxLandings int) (string, string) {
+func requeuePlane(ctx context.Context, rdb *redis.Client, planeID string, opType string, originalScore float64) {
+	if opType == "LANDING" {
+		rdb.ZAdd(ctx, "landing_queue", redis.Z{Score: originalScore, Member: planeID})
+	} else {
+		rdb.RPush(ctx, "takeoff_queue", planeID)
+	}
+}
+
+func getNextPlane(ctx context.Context, rdb *redis.Client, consecutive *int, maxLandings int) (string, string, float64) {
 	if *consecutive >= maxLandings {
-		res, err := rdb.BLPop(ctx, 1*time.Second, "takeoff_queue").Result()
+		res, err := rdb.BLPop(ctx, 100*time.Millisecond, "takeoff_queue").Result()
 		if err == nil && len(res) == 2 {
 			*consecutive = 0
-			return res[1], "TAKEOFF"
+			return res[1], "TAKEOFF", 0
 		}
 	}
 
-	zRes, err := rdb.BZPopMin(ctx, 1*time.Second, "landing_queue").Result()
+	zRes, err := rdb.BZPopMin(ctx, 100*time.Millisecond, "landing_queue").Result()
 	if err == nil && zRes != nil {
 		*consecutive++
-		return zRes.Member.(string), "LANDING"
+		return zRes.Member.(string), "LANDING", zRes.Score
 	}
 
-	res, err := rdb.BLPop(ctx, 1*time.Second, "takeoff_queue").Result()
+	res, err := rdb.BLPop(ctx, 100*time.Millisecond, "takeoff_queue").Result()
 	if err == nil && len(res) == 2 {
 		*consecutive = 0
-		return res[1], "TAKEOFF"
+		return res[1], "TAKEOFF", 0
 	}
 
-	return "", ""
+	return "", "", 0
 }
 
-func waitForAction(eventMsgs <-chan *redis.Message, timeout time.Duration) (string, error) {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	for {
-		select {
-		case msg := <-eventMsgs:
-			return msg.Payload, nil
-		case <-timer.C:
-			return "", errors.New("timeout")
-		}
+func waitForAction(ctx context.Context, rdb *redis.Client, planeID string, timeout time.Duration) (string, error) {
+	res, err := rdb.BLPop(ctx, timeout, "events:"+planeID).Result()
+	if err != nil {
+		return "", err
 	}
+	rdb.Del(ctx, "events:"+planeID)
+	return res[1], nil
 }
