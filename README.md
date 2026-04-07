@@ -71,7 +71,13 @@ If an airplane runs out of fuel while waiting, it instantly triggers a `CANCEL` 
 
 The project is easily orchestrated using the provided `Makefile`. Open three separate terminal instances:
 
-**1. Start the Infrastructure**
+**1. Start and Setup the Infrastructure**
+
+Compile .proto files
+
+```bash
+make gen
+```
 
 Spins up the Redis instance via Docker.
 
