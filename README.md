@@ -2,7 +2,7 @@
 
 An event-driven, high-concurrency Air Traffic Control (ATC) simulator built with **Go**, **gRPC**, and **Redis**.
 
-This project serves as a proof-of-concept for advanced distributed system patterns, specifically tackling complex queueing problems like strict priority routing, starvation prevention, and perfect Earliest Deadline First (EDF) scheduling.
+This project serves as a proof-of-concept for advanced distributed system patterns, specifically tackling complex queueing problems like strict priority routing, starvation prevention, perfect Earliest Deadline First (EDF) scheduling, and proactive self-healing.
 
 ## The Challenge
 
@@ -12,9 +12,50 @@ Managing an airport runway is a classic critical-resource problem. The system mu
 2. Planes that crash or lose communication do not lock the runway.
 3. Planes waiting to take off are not starved indefinitely by a constant stream of emergency landings.
 
-## Architecture & Tech Stack
+## Architecture & Data Flow
 
-* **Go (Golang):** Chosen for its first-class concurrency capabilities (goroutines/channels) to simulate dozens of planes communicating simultaneously.
+```mermaid
+graph TD
+    subgraph Clients
+        P1(Airplane: Landing)
+        P2(Airplane: Takeoff)
+    end
+
+    subgraph Control Tower
+        S_API(gRPC Server API)
+        S_Ctx(Go Context Deadlines & Grace Period)
+    end
+
+    subgraph Redis Reliable Engine
+        ZSET(landing_queue: ZSET <br/> Score: Crash Timestamp)
+        LIST(takeoff_queue: LIST)
+        RES(response: AirplaneID)
+    end
+
+    subgraph Worker FSM
+        W_Sched(Weighted Scheduler)
+    end
+
+    %% Flow
+    P1 -- RequestLanding <br/> (Fuel: X secs) --> S_API
+    P2 -- RequestTakeoff --> S_API
+
+    S_API -- Calculates Absolute Deadline --> ZSET
+    S_API -- Enqueues --> LIST
+    S_API -- BLPop bounded by Context --> RES
+    
+    W_Sched -- Non-blocking ZPopMin --> ZSET
+    W_Sched -- Non-blocking LPop --> LIST
+
+    W_Sched -- Publishes 'CLEARED' --> RES
+    RES -. Wakes up gRPC Server .-> S_Ctx
+    S_Ctx -. Returns Clearance .-> P1
+    S_Ctx -. Self-Heals / Cleans Ghost Planes on Timeout .-> ZSET
+```
+
+## Tech Stack
+
+* **Go (Golang):** Chosen for its first-class concurrency capabilities (goroutines/channels/contexts) to simulate dozens of planes communicating simultaneously with millisecond precision.
 * **gRPC & Protobuf:** Used for the strict, high-performance synchronous communication between the airplanes (clients) and the Control Tower (server).
 * **Redis:** Acts as the high-speed, mathematically precise in-memory data store, utilizing **Sorted Sets (ZSET)** for priority queues and **Lists** for FIFO queues and reliable point-to-point event notifications.
 * **Docker & Make:** For reproducible infrastructure and streamlined execution.
@@ -31,17 +72,17 @@ In traditional message brokers like RabbitMQ, priority is a static "bucket" (e.g
 
 * We use a **Redis Sorted Set (ZSET)**.
 * The "Score" of the plane is its **Absolute Crash Timestamp** (`CurrentTime + FuelRemaining`).
-* As time passes, the absolute timestamp never changes, but the system simply pulls the plane with the lowest numerical score using `BZPOPMIN`. The Earliest Deadline First is always mathematically perfect.
+* As time passes, the absolute timestamp never changes, but the system simply pulls the plane with the lowest numerical score using `ZPOPMIN`. The Earliest Deadline First is always mathematically perfect.
 
 ### What We Sacrificed (Acknowledgments)
 
-By moving to Redis, we sacrificed the native `Ack` (Acknowledgment) mechanism of RabbitMQ. In Redis, `BZPOPMIN` physically removes the item from the queue. If our Worker crashes immediately after pulling a plane, that plane's data is lost. In a production scenario, this would be mitigated by atomic Lua scripts that move the plane to an "in-flight" tracking list until confirmed.
+By moving to Redis, we sacrificed the native `Ack` (Acknowledgment) mechanism of RabbitMQ. In Redis, `ZPOPMIN` physically removes the item from the queue. If our Worker crashes immediately after pulling a plane, that plane's data is lost. In a production scenario, this would be mitigated by atomic Lua scripts that move the plane to an "in-flight" tracking list until confirmed.
 
 ## Core Mechanics & System Design
 
 ### 1. Earliest Deadline First (EDF)
 
-When an airplane requests a landing, the gRPC server calculates the exact UNIX timestamp of when it will run out of fuel. It pushes this to the Redis `landing_queue` (ZSET). The Worker always pops the plane with the smallest timestamp, guaranteeing absolute priority without CPU-heavy resorting.
+When an airplane requests a landing, the gRPC server calculates the exact UNIX timestamp (in fractional seconds) of when it will run out of fuel. It pushes this to the Redis `landing_queue` (ZSET). The Worker always pops the plane with the smallest timestamp, guaranteeing absolute priority without CPU-heavy resorting.
 
 ### 2. Starvation Prevention (Weighted Fair Queuing)
 
@@ -53,11 +94,11 @@ To prevent duplicate requests and race conditions, the gRPC API implements stron
 
 ### 4. Synchronous API over Reliable Asynchronous Messaging
 
-Airplanes use synchronous gRPC calls that *block* until the ATC grants clearance. Behind the scenes, the gRPC server routes the request through Redis and waits on a dedicated blocking List (`BLPOP`) for that specific airplane. This eliminates lost messages from fire-and-forget Pub/Sub and perfectly hides the async complexity from the client.
+Airplanes use synchronous gRPC calls that *block* until the ATC grants clearance. Behind the scenes, the gRPC server routes the request through Redis and waits on a dedicated blocking List (`BLPOP`). To ensure millisecond precision, the server bounds the Redis wait state to a Go `context.WithTimeout`, strictly based on the plane's remaining fuel plus a slight network "grace period".
 
-### 5. Fail-Fast & Timeout Re-queueing
+### 5. Proactive Self-Healing & Fail-Fast
 
-If an airplane runs out of fuel while waiting, it instantly triggers a `CANCEL` RPC call (Fail-Fast pattern), releasing the runway in milliseconds. If a plane stops responding due to network issues, the Worker's strict `Timeouts` trigger a safe re-queueing mechanism, placing the airplane back into the priority queue using its *original timestamp score*, ensuring it doesn't lose its priority status.
+The system operates under a "never trust the client" philosophy. If an airplane runs out of fuel while waiting, or loses network connection, the gRPC server's Context Deadline instantly expires. The server proactively cleans up the "ghost" plane from Redis, preventing deadlocks and ensuring the FSM Worker never wastes cycles processing dead aircraft. Furthermore, the Worker utilizes non-blocking polling (`ZPOPMIN`/`LPOP`) to maintain microsecond transitions between queues, eliminating Head-of-Line blocking caused by static Redis timeouts.
 
 ## Getting Started
 
@@ -73,13 +114,13 @@ The project is easily orchestrated using the provided `Makefile`. Open three sep
 
 **1. Start and Setup the Infrastructure**
 
-Compile .proto files
+Compile .proto files:
 
 ```bash
 make gen
 ```
 
-Spins up the Redis instance via Docker.
+Spins up the Redis instance via Docker:
 
 ```bash
 make infra-up
