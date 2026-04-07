@@ -74,9 +74,22 @@ func (s *atcServer) RequestLanding(ctx context.Context, req *pb.LandingRequest) 
 
 	log.Printf("[gRPC] Plane %s enqueued for LANDING (Crash at: %.2f). Waiting for clearance...", req.AirplaneId, crashTime)
 
-	res, err := s.rdb.BLPop(ctx, 0, "response:"+req.AirplaneId).Result()
+	gracePeriod := 1.0
+	maxWaitTime := time.Duration((req.TimeRemaining + gracePeriod) * float64(time.Second))
+
+	waitCtx, cancel := context.WithTimeout(ctx, maxWaitTime)
+	defer cancel()
+
+	res, err := s.rdb.BLPop(waitCtx, 0, "response:"+req.AirplaneId).Result()
 	if err != nil {
-		s.rdb.Del(ctx, "active:"+req.AirplaneId)
+		log.Printf("[gRPC] Clearing aircraft %s (Fuel timeout or disconnection)", req.AirplaneId)
+
+		s.rdb.Del(context.Background(), "active:"+req.AirplaneId)
+		s.rdb.ZRem(context.Background(), "landing_queue", req.AirplaneId)
+
+		if err == context.DeadlineExceeded {
+			return nil, fmt.Errorf("ran out of fuel while waiting for clearance")
+		}
 		return nil, err
 	}
 
@@ -96,6 +109,8 @@ func (s *atcServer) CompleteOperation(ctx context.Context, req *pb.OperationRequ
 
 func (s *atcServer) CancelOperation(ctx context.Context, req *pb.OperationRequest) (*pb.OperationResponse, error) {
 	s.rdb.Del(ctx, "active:"+req.AirplaneId)
+	s.rdb.ZRem(ctx, "landing_queue", req.AirplaneId)
+	s.rdb.LRem(ctx, "takeoff_queue", 0, req.AirplaneId)
 	s.rdb.RPush(ctx, "events:"+req.AirplaneId, "CANCEL")
 	return &pb.OperationResponse{Success: true, Message: "Cancel signal sent"}, nil
 }

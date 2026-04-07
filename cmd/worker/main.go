@@ -65,6 +65,11 @@ func main() {
 
 func requeuePlane(ctx context.Context, rdb *redis.Client, planeID string, opType string, originalScore float64) {
 	if opType == "LANDING" {
+		currentTimestamp := float64(time.Now().UnixNano()) / 1e9
+		if currentTimestamp >= originalScore {
+			fmt.Printf("[Worker] Plane %s ignored, crash time has passed.", planeID)
+			return
+		}
 		rdb.ZAdd(ctx, "landing_queue", redis.Z{Score: originalScore, Member: planeID})
 	} else {
 		rdb.RPush(ctx, "takeoff_queue", planeID)
@@ -73,24 +78,26 @@ func requeuePlane(ctx context.Context, rdb *redis.Client, planeID string, opType
 
 func getNextPlane(ctx context.Context, rdb *redis.Client, consecutive *int, maxLandings int) (string, string, float64) {
 	if *consecutive >= maxLandings {
-		res, err := rdb.BLPop(ctx, 100*time.Millisecond, "takeoff_queue").Result()
-		if err == nil && len(res) == 2 {
+		res, err := rdb.LPop(ctx, "takeoff_queue").Result()
+		if err == nil && res != "" {
 			*consecutive = 0
-			return res[1], "TAKEOFF", 0
+			return res, "TAKEOFF", 0
 		}
 	}
 
-	zRes, err := rdb.BZPopMin(ctx, 100*time.Millisecond, "landing_queue").Result()
-	if err == nil && zRes != nil {
+	zRes, err := rdb.ZPopMin(ctx, "landing_queue", 1).Result()
+	if err == nil && len(zRes) > 0 {
 		*consecutive++
-		return zRes.Member.(string), "LANDING", zRes.Score
+		return zRes[0].Member.(string), "LANDING", zRes[0].Score
 	}
 
-	res, err := rdb.BLPop(ctx, 100*time.Millisecond, "takeoff_queue").Result()
-	if err == nil && len(res) == 2 {
+	res, err := rdb.LPop(ctx, "takeoff_queue").Result()
+	if err == nil && res != "" {
 		*consecutive = 0
-		return res[1], "TAKEOFF", 0
+		return res, "TAKEOFF", 0
 	}
+
+	time.Sleep(100 * time.Millisecond)
 
 	return "", "", 0
 }
